@@ -1,0 +1,93 @@
+require('dotenv').config();
+const express = require('express');
+const fetch = (...args) => import('node-fetch').then(({default: fetch}) => fetch(...args));
+const path = require('path');
+const app = express();
+
+// Config
+const PORT = process.env.PORT || 3000;
+const CLAUDE_API_KEY = process.env.CLAUDE_API_KEY;
+const CLAUDE_MODEL = process.env.CLAUDE_MODEL || 'claude-sonnet-4-20250514';
+const CLAUDE_API = 'https://api.anthropic.com/v1/messages';
+
+// Middleware
+app.use(express.json({ limit: '10mb' }));
+app.use(express.static(path.join(__dirname, 'public')));
+
+// Health check
+app.get('/api/health', (req, res) => {
+  res.json({ status: 'ok', timestamp: new Date().toISOString() });
+});
+
+// 🔐 Proxy Endpoint: Claude API (amankan key di backend)
+app.post('/api/claude', async (req, res) => {
+  try {
+    if (!CLAUDE_API_KEY || !CLAUDE_API_KEY.startsWith('sk-ant-')) {
+      return res.status(500).json({ error: 'Server: Claude API key tidak terkonfigurasi' });
+    }
+
+    const { messages, system, max_tokens = 4096, stream = false } = req.body;
+    
+    if (!messages || !Array.isArray(messages)) {
+      return res.status(400).json({ error: 'Request harus berisi array "messages"' });
+    }
+
+    const response = await fetch(CLAUDE_API, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': CLAUDE_API_KEY,
+        'anthropic-version': '2023-06-01'
+        // ⚠️ HAPUS header 'anthropic-dangerous-direct-browser-access' di backend
+      },
+      body: JSON.stringify({
+        model: CLAUDE_MODEL,
+        max_tokens,
+        stream,
+        system: system || '',
+        messages
+      })
+    });
+
+    if (!response.ok) {
+      let errorData = { message: `HTTP ${response.status}` };
+      try { errorData = await response.json(); } catch (_) {}
+      return res.status(response.status).json({ 
+        error: errorData.error?.message || errorData.message || 'Claude API error' 
+      });
+    }
+
+    // Untuk streaming: proxy stream ke client
+    if (stream) {
+      res.setHeader('Content-Type', 'text/event-stream');
+      res.setHeader('Cache-Control', 'no-cache');
+      res.setHeader('Connection', 'keep-alive');
+      response.body.pipe(res);
+    } else {
+      const data = await response.json();
+      res.json(data);
+    }
+
+  } catch (err) {
+    console.error('Claude proxy error:', err.message);
+    res.status(500).json({ error: 'Gagal menghubungi Claude API', detail: err.message });
+  }
+});
+
+// 📁 File upload handler (opsional - untuk ekstrak teks DOCX/PDF)
+app.post('/api/extract-text', async (req, res) => {
+  // Implementasi ekstrak teks bisa ditambahkan nanti
+  // Untuk sekarang, frontend handle via mammoth.js & pdf.js di browser
+  res.status(501).json({ error: 'Fitur ekstrak server belum diaktifkan' });
+});
+
+// Serve frontend untuk semua route lain
+app.get('*', (req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'index.html'));
+});
+
+// Start server
+app.listen(PORT, () => {
+  console.log(`🚀 AI Detector Claude running on port ${PORT}`);
+  console.log(`📁 Serving static files from: ${path.join(__dirname, 'public')}`);
+});
